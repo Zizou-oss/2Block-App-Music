@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
+import 'dart:async';
 
 class AudioService {
   final AudioPlayer _audioPlayer = AudioPlayer();
@@ -8,6 +9,16 @@ class AudioService {
   Function(Duration)? onPositionChanged;
   Function(Duration)? onDurationChanged;
   VoidCallback? onComplete;
+  
+  // Gestion des tentatives de reconnexion
+  int _retryCount = 0;
+  static const int _maxRetries = 3;
+  static const Duration _retryDelay = Duration(seconds: 2);
+  Timer? _retryTimer;
+  
+  // Cache de l'URL actuelle pour la récupération
+  String? _currentUrl;
+  bool _isDisposed = false;
 
   AudioService() {
     // Synchronisation de l'état de lecture
@@ -38,27 +49,66 @@ class AudioService {
     });
   }
 
-  Future<void> play(String source) async {
+  Future<void> play(String source, {bool retry = true}) async {
+    if (_isDisposed) return;
+    
     try {
       if (source.isEmpty) {
-        throw Exception('Source audio vide');
+        throw ArgumentError('Source audio vide');
       }
+      
+      _currentUrl = source;
+      _retryCount = 0;
+      
       if (kDebugMode) {
         print('Playing source: $source');
       }
-      if (source.startsWith('http://') || source.startsWith('https://')) {
-        await _audioPlayer.setUrl(source);
-      } else {
-        await _audioPlayer.setFilePath(source);
-      }
-      await _audioPlayer.play();
+      
+      await _loadAndPlay(source);
+      
     } catch (e) {
       if (kDebugMode) {
         print('AudioService error: $e');
       }
-      onError?.call(e.toString());
-      rethrow;
+      
+      if (retry && _retryCount < _maxRetries) {
+        await _retryPlay(source);
+      } else {
+        onError?.call(e.toString());
+        rethrow;
+      }
     }
+  }
+  
+  Future<void> _loadAndPlay(String source) async {
+    if (source.startsWith('http://') || source.startsWith('https://')) {
+      await _audioPlayer.setUrl(source);
+    } else {
+      await _audioPlayer.setFilePath(source);
+    }
+    await _audioPlayer.play();
+  }
+  
+  Future<void> _retryPlay(String source) async {
+    _retryCount++;
+    if (kDebugMode) {
+      print('Tentative de reconnexion ${_retryCount}/$_maxRetries pour: $source');
+    }
+    
+    _retryTimer?.cancel();
+    _retryTimer = Timer(_retryDelay, () async {
+      if (!_isDisposed) {
+        try {
+          await _loadAndPlay(source);
+        } catch (e) {
+          if (_retryCount < _maxRetries) {
+            await _retryPlay(source);
+          } else {
+            onError?.call('Échec après $_maxRetries tentatives: ${e.toString()}');
+          }
+        }
+      }
+    });
   }
 
   Future<void> pause() async {
@@ -84,6 +134,30 @@ class AudioService {
   Duration? getDuration() => _audioPlayer.duration;
 
   void dispose() {
+    _isDisposed = true;
+    _retryTimer?.cancel();
     _audioPlayer.dispose();
+  }
+  
+  // Méthode pour vérifier la connectivité réseau
+  Future<bool> checkConnectivity() async {
+    try {
+      final uri = Uri.parse('https://www.google.com');
+      final response = await Future.any([
+        Future.delayed(const Duration(seconds: 5), () => null),
+        // Simple test de connectivité
+        Future.value(true), // Placeholder - nécessiterait package connectivity_plus
+      ]);
+      return response == true;
+    } catch (e) {
+      return false;
+    }
+  }
+  
+  // Récupération après erreur réseau
+  Future<void> retryCurrentTrack() async {
+    if (_currentUrl != null && !_isDisposed) {
+      await play(_currentUrl!, retry: true);
+    }
   }
 }

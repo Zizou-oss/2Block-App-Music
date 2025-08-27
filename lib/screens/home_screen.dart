@@ -1,10 +1,14 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:io';
 import '../models/track.dart';
 import '../services/github_service.dart';
 import '../services/audio_service.dart';
 
 enum PlayerState { stopped, loading, playing, paused, error }
+enum LoadingState { initial, loading, loaded, error, retry }
+enum NetworkState { connected, disconnected, unknown }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -16,9 +20,17 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   List<Track> tracks = [];
   List<Track> filteredTracks = [];
-  bool _isLoading = true;
+  LoadingState _loadingState = LoadingState.initial;
   bool _isSearching = false;
   final TextEditingController _searchController = TextEditingController();
+  String? _errorMessage;
+  Timer? _searchDebouncer;
+  NetworkState _networkState = NetworkState.unknown;
+  
+  // Contrôleurs pour la gestion de la performance
+  Timer? _retryTimer;
+  int _retryAttempts = 0;
+  static const int _maxRetryAttempts = 3;
 
   PlayerState _playerState = PlayerState.stopped;
   int? _currentlyPlayingIndex;
@@ -46,7 +58,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     loadTracks();
     _initializeAudioService();
     _searchController.addListener(() {
-      _filterTracks(_searchController.text);
+      _debouncedFilterTracks(_searchController.text);
     });
   }
 
@@ -55,6 +67,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _searchController.dispose();
     _audioService.dispose();
     _playerController.dispose();
+    _searchDebouncer?.cancel();
+    _retryTimer?.cancel();
     super.dispose();
   }
 
@@ -106,14 +120,28 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     };
   }
 
+  void _debouncedFilterTracks(String query) {
+    _searchDebouncer?.cancel();
+    _searchDebouncer = Timer(const Duration(milliseconds: 300), () {
+      _filterTracks(query);
+    });
+  }
+
   void _filterTracks(String query) {
+    if (!mounted) return;
+    
     setState(() {
       if (query.isEmpty) {
         filteredTracks = List.from(tracks);
       } else {
-        filteredTracks = tracks
-            .where((track) => track.title.toLowerCase().contains(query.toLowerCase()))
-            .toList();
+        // Utiliser le service optimisé pour la recherche
+        filteredTracks = GithubService.searchTracks(query);
+        if (filteredTracks.isEmpty) {
+          // Fallback sur la recherche locale si le service ne retourne rien
+          filteredTracks = tracks
+              .where((track) => track.title.toLowerCase().contains(query.toLowerCase()))
+              .toList();
+        }
       }
     });
   }
@@ -130,26 +158,124 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     });
   }
 
-  Future<void> loadTracks() async {
-    setState(() => _isLoading = true);
+  Future<void> loadTracks({bool forceRefresh = false}) async {
+    if (!mounted) return;
+    
+    setState(() {
+      _loadingState = LoadingState.loading;
+      _errorMessage = null;
+    });
+    
     try {
-      tracks = await GithubService.fetchTracks();
+      // Vérifier la connectivité réseau
+      await _checkNetworkConnectivity();
+      
+      tracks = await GithubService.fetchTracks(forceRefresh: forceRefresh);
       filteredTracks = List.from(tracks);
-    } catch (e) {
+      
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erreur de chargement des pistes: $e')),
-        );
+        setState(() {
+          _loadingState = LoadingState.loaded;
+          _networkState = NetworkState.connected;
+          _retryAttempts = 0;
+        });
       }
-    } finally {
-      setState(() => _isLoading = false);
+    } on SocketException catch (e) {
+      _handleNetworkError('Problème de connexion: ${e.message}');
+    } on TimeoutException catch (e) {
+      _handleNetworkError('Délai dépassé: ${e.message ?? 'Connexion trop lente'}');
+    } catch (e) {
+      _handleGenericError(e.toString());
     }
+  }
+  
+  Future<void> _checkNetworkConnectivity() async {
+    try {
+      final result = await InternetAddress.lookup('github.com')
+          .timeout(const Duration(seconds: 5));
+      if (result.isEmpty || result[0].rawAddress.isEmpty) {
+        throw const SocketException('Pas de connexion internet');
+      }
+      _networkState = NetworkState.connected;
+    } catch (e) {
+      _networkState = NetworkState.disconnected;
+      rethrow;
+    }
+  }
+  
+  void _handleNetworkError(String message) {
+    if (!mounted) return;
+    
+    setState(() {
+      _loadingState = LoadingState.error;
+      _networkState = NetworkState.disconnected;
+      _errorMessage = message;
+    });
+    
+    _showErrorSnackBar(message, canRetry: true);
+  }
+  
+  void _handleGenericError(String message) {
+    if (!mounted) return;
+    
+    setState(() {
+      _loadingState = LoadingState.error;
+      _errorMessage = message;
+    });
+    
+    _showErrorSnackBar('Erreur de chargement: $message');
+  }
+  
+  void _showErrorSnackBar(String message, {bool canRetry = false}) {
+    if (!mounted) return;
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 4),
+        action: canRetry ? SnackBarAction(
+          label: 'Réessayer',
+          textColor: Colors.white,
+          onPressed: () => _retryLoad(),
+        ) : null,
+      ),
+    );
+  }
+  
+  Future<void> _retryLoad() async {
+    if (_retryAttempts >= _maxRetryAttempts) {
+      _showErrorSnackBar('Trop de tentatives échouées. Vérifiez votre connexion.');
+      return;
+    }
+    
+    _retryAttempts++;
+    _retryTimer?.cancel();
+    _retryTimer = Timer(Duration(seconds: _retryAttempts * 2), () {
+      loadTracks(forceRefresh: true);
+    });
   }
 
   Future<void> _startPlayback(Track track, int index) async {
+    // Validation des entrées
+    if (!track.isValidUrl) {
+      _showErrorSnackBar('URL invalide pour ce track');
+      return;
+    }
+    
     if (_currentlyPlayingIndex == index && _currentTrack?.url == track.url) {
       await _togglePlayback();
       return;
+    }
+
+    // Vérifier la connectivité avant de commencer
+    if (_networkState == NetworkState.disconnected) {
+      try {
+        await _checkNetworkConnectivity();
+      } catch (e) {
+        _showErrorSnackBar('Pas de connexion internet', canRetry: true);
+        return;
+      }
     }
 
     setState(() {
@@ -166,24 +292,42 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         print('Playing URL: ${track.url}');
       }
       await _audioService.play(track.url);
-      setState(() {
-        _playerState = _audioService.isPlaying() ? PlayerState.playing : PlayerState.paused;
-      });
-    } catch (e) {
-      setState(() {
-        _playerState = PlayerState.error;
-        _currentlyPlayingIndex = null;
-        _currentTrack = null;
-      });
+      
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Erreur de lecture: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        setState(() {
+          _playerState = _audioService.isPlaying() ? PlayerState.playing : PlayerState.paused;
+        });
       }
+    } on SocketException catch (e) {
+      _handlePlaybackNetworkError('Problème de réseau: ${e.message}');
+    } on TimeoutException catch (e) {
+      _handlePlaybackNetworkError('Délai dépassé: ${e.message ?? 'Chargement trop lent'}');
+    } catch (e) {
+      _handlePlaybackError('Erreur de lecture: $e');
     }
+  }
+  
+  void _handlePlaybackNetworkError(String message) {
+    if (!mounted) return;
+    
+    setState(() {
+      _playerState = PlayerState.error;
+      _networkState = NetworkState.disconnected;
+    });
+    
+    _showErrorSnackBar(message, canRetry: true);
+  }
+  
+  void _handlePlaybackError(String message) {
+    if (!mounted) return;
+    
+    setState(() {
+      _playerState = PlayerState.error;
+      _currentlyPlayingIndex = null;
+      _currentTrack = null;
+    });
+    
+    _showErrorSnackBar(message);
   }
 
   Future<void> _togglePlayback() async {
@@ -387,189 +531,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       body: Stack(
         children: [
           if (!_isPlayerExpanded)
-            _isLoading
-                ? const Center(child: CircularProgressIndicator(color: Color(0xFF1DB954)))
-                : RefreshIndicator(
-                    color: const Color(0xFF1DB954),
-                    onRefresh: loadTracks,
-                    child: CustomScrollView(
-                      physics: const BouncingScrollPhysics(),
-                      slivers: [
-                        if (!_isSearching || (_isSearching && _searchController.text.isEmpty))
-                          SliverToBoxAdapter(
-                            child: Container(
-                              height: 180,
-                              margin: const EdgeInsets.all(16),
-                              decoration: BoxDecoration(
-                                gradient: const LinearGradient(
-                                  colors: [Color(0xFF1DB954), Color(0xFF191414)],
-                                  begin: Alignment.topLeft,
-                                  end: Alignment.bottomRight,
-                                ),
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                              child: Stack(
-                                children: [
-                                  Positioned(
-                                    bottom: 20,
-                                    left: 20,
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        const Text(
-                                          'Ma Collection',
-                                          style: TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 24,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                        Text(
-                                          '${tracks.length} titres disponibles',
-                                          style: TextStyle(
-                                            color: Colors.white.withOpacity(0.8),
-                                            fontSize: 14,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  Positioned(
-                                    bottom: 20,
-                                    right: 20,
-                                    child: ElevatedButton(
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: Colors.white,
-                                        foregroundColor: Colors.black,
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(20),
-                                        ),
-                                      ),
-                                      onPressed: () {
-                                        if (tracks.isNotEmpty) {
-                                          _startPlayback(tracks[0], 0);
-                                        }
-                                      },
-                                      child: const Text('Écouter'),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.only(left: 16, top: 16, bottom: 8),
-                            child: Text(
-                              _isSearching && _searchController.text.isNotEmpty
-                                  ? 'Résultats pour "${_searchController.text}"'
-                                  : 'Tous les titres',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 20,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                        if (_isSearching && _searchController.text.isNotEmpty && filteredTracks.isEmpty)
-                          const SliverToBoxAdapter(
-                            child: Center(
-                              child: Padding(
-                                padding: EdgeInsets.all(24),
-                                child: Text(
-                                  'Aucun titre trouvé',
-                                  style: TextStyle(color: Colors.grey, fontSize: 16),
-                                ),
-                              ),
-                            ),
-                          ),
-                        SliverList(
-                          delegate: SliverChildBuilderDelegate(
-                            (context, index) {
-                              final track = filteredTracks[index];
-                              final bool isCurrentTrack =
-                                  _currentlyPlayingIndex == index && _currentTrack?.url == track.url;
-                              return Container(
-                                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                                decoration: BoxDecoration(
-                                  color: isCurrentTrack ? const Color(0xFF2A2A2A) : const Color(0xFF212121),
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: isCurrentTrack
-                                      ? Border.all(color: const Color(0xFF1DB954), width: 1)
-                                      : null,
-                                ),
-                                child: ListTile(
-                                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                                  leading: Stack(
-                                    children: [
-                                      ClipRRect(
-                                        borderRadius: BorderRadius.circular(8),
-                                        child: track.imageUrl.isNotEmpty
-                                            ? Image.network(
-                                                track.imageUrl,
-                                                width: 56,
-                                                height: 56,
-                                                fit: BoxFit.cover,
-                                                errorBuilder: (context, error, stackTrace) => Container(
-                                                  width: 56,
-                                                  height: 56,
-                                                  color: Colors.grey[800],
-                                                  child: const Icon(Icons.music_note, color: Color(0xFF1DB954)),
-                                                ),
-                                              )
-                                            : Container(
-                                                width: 56,
-                                                height: 56,
-                                                color: Colors.grey[800],
-                                                child: const Icon(Icons.music_note, color: Color(0xFF1DB954)),
-                                              ),
-                                      ),
-                                      if (isCurrentTrack)
-                                        Positioned.fill(
-                                          child: Container(
-                                            decoration: BoxDecoration(
-                                              color: Colors.black54,
-                                              borderRadius: BorderRadius.circular(8),
-                                            ),
-                                            child: Center(
-                                              child: Icon(
-                                                _playerState == PlayerState.playing
-                                                    ? Icons.volume_up
-                                                    : Icons.pause,
-                                                color: const Color(0xFF1DB954),
-                                                size: 20,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                  title: Text(
-                                    track.title,
-                                    style: TextStyle(
-                                      color: isCurrentTrack ? const Color(0xFF1DB954) : Colors.white,
-                                      fontWeight: isCurrentTrack ? FontWeight.bold : FontWeight.w500,
-                                    ),
-                                  ),
-                                  subtitle: Text(
-                                    isCurrentTrack ? _statusText : 'Appuyez pour écouter',
-                                    style: TextStyle(
-                                      color: isCurrentTrack ? const Color(0xFF1DB954) : Colors.grey,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                  onTap: () => _startPlayback(track, index),
-                                ),
-                              );
-                            },
-                            childCount: filteredTracks.length,
-                          ),
-                        ),
-                        SliverToBoxAdapter(child: SizedBox(height: _shouldShowMiniPlayer ? 140 : 80)),
-                      ],
-                    ),
-                  ),
+            _buildMainContent(),
           if (_shouldShowMiniPlayer)
             Positioned(
               left: 0,
@@ -938,6 +900,327 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildMainContent() {
+    switch (_loadingState) {
+      case LoadingState.initial:
+      case LoadingState.loading:
+        return const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(color: Color(0xFF1DB954)),
+              SizedBox(height: 16),
+              Text(
+                'Chargement des pistes...',
+                style: TextStyle(color: Colors.white70),
+              ),
+            ],
+          ),
+        );
+      
+      case LoadingState.error:
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  _networkState == NetworkState.disconnected 
+                    ? Icons.wifi_off 
+                    : Icons.error_outline,
+                  color: Colors.red,
+                  size: 64,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  _errorMessage ?? 'Une erreur est survenue',
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton.icon(
+                  onPressed: () => loadTracks(forceRefresh: true),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Réessayer'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1DB954),
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+                if (_networkState == NetworkState.disconnected) ...[
+                  const SizedBox(height: 16),
+                  TextButton(
+                    onPressed: () async {
+                      try {
+                        await _checkNetworkConnectivity();
+                        loadTracks(forceRefresh: true);
+                      } catch (e) {
+                        _showErrorSnackBar('Toujours pas de connexion');
+                      }
+                    },
+                    child: const Text(
+                      'Vérifier la connexion',
+                      style: TextStyle(color: Color(0xFF1DB954)),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      
+      case LoadingState.loaded:
+        return RefreshIndicator(
+          color: const Color(0xFF1DB954),
+          onRefresh: () => loadTracks(forceRefresh: true),
+          child: CustomScrollView(
+            physics: const BouncingScrollPhysics(),
+            slivers: [
+              if (!_isSearching || (_isSearching && _searchController.text.isEmpty))
+                SliverToBoxAdapter(
+                  child: Container(
+                    height: 180,
+                    margin: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF1DB954), Color(0xFF191414)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Stack(
+                      children: [
+                        Positioned(
+                          bottom: 20,
+                          left: 20,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Ma Collection',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              Text(
+                                '${tracks.length} titres disponibles',
+                                style: TextStyle(
+                                  color: Colors.white.withOpacity(0.8),
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Positioned(
+                          bottom: 20,
+                          right: 20,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              foregroundColor: Colors.black,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                            ),
+                            onPressed: () {
+                              if (tracks.isNotEmpty) {
+                                _startPlayback(tracks[0], 0);
+                              }
+                            },
+                            child: const Text('Écouter'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 16, top: 16, bottom: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _isSearching && _searchController.text.isNotEmpty
+                              ? 'Résultats pour "${_searchController.text}"'
+                              : 'Tous les titres',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      if (_networkState == NetworkState.disconnected)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.orange,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Text(
+                            'Hors ligne',
+                            style: TextStyle(color: Colors.white, fontSize: 12),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              if (_isSearching && _searchController.text.isNotEmpty && filteredTracks.isEmpty)
+                const SliverToBoxAdapter(
+                  child: Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Column(
+                        children: [
+                          Icon(Icons.search_off, color: Colors.grey, size: 48),
+                          SizedBox(height: 16),
+                          Text(
+                            'Aucun titre trouvé',
+                            style: TextStyle(color: Colors.grey, fontSize: 16),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) {
+                    final track = filteredTracks[index];
+                    final bool isCurrentTrack =
+                        _currentlyPlayingIndex == index && _currentTrack?.url == track.url;
+                    return _buildTrackListItem(track, index, isCurrentTrack);
+                  },
+                  childCount: filteredTracks.length,
+                ),
+              ),
+              SliverToBoxAdapter(child: SizedBox(height: _shouldShowMiniPlayer ? 140 : 80)),
+            ],
+          ),
+        );
+      
+      case LoadingState.retry:
+        return const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(color: Color(0xFF1DB954)),
+              SizedBox(height: 16),
+              Text(
+                'Nouvelle tentative...',
+                style: TextStyle(color: Colors.white70),
+              ),
+            ],
+          ),
+        );
+    }
+  }
+
+  Widget _buildTrackListItem(Track track, int index, bool isCurrentTrack) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      decoration: BoxDecoration(
+        color: isCurrentTrack ? const Color(0xFF2A2A2A) : const Color(0xFF212121),
+        borderRadius: BorderRadius.circular(12),
+        border: isCurrentTrack
+            ? Border.all(color: const Color(0xFF1DB954), width: 1)
+            : null,
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        leading: Stack(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: track.imageUrl.isNotEmpty
+                  ? Image.network(
+                      track.imageUrl,
+                      width: 56,
+                      height: 56,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) => _buildDefaultImage(),
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return _buildLoadingImage();
+                      },
+                    )
+                  : _buildDefaultImage(),
+            ),
+            if (isCurrentTrack)
+              Positioned.fill(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Center(
+                    child: Icon(
+                      _playerState == PlayerState.playing
+                          ? Icons.volume_up
+                          : _playerState == PlayerState.loading
+                              ? Icons.hourglass_empty
+                              : Icons.pause,
+                      color: const Color(0xFF1DB954),
+                      size: 20,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        title: Text(
+          track.title,
+          style: TextStyle(
+            color: isCurrentTrack ? const Color(0xFF1DB954) : Colors.white,
+            fontWeight: isCurrentTrack ? FontWeight.bold : FontWeight.w500,
+          ),
+        ),
+        subtitle: Text(
+          isCurrentTrack ? _statusText : 'Appuyez pour écouter',
+          style: TextStyle(
+            color: isCurrentTrack ? const Color(0xFF1DB954) : Colors.grey,
+            fontSize: 12,
+          ),
+        ),
+        onTap: () => _startPlayback(track, index),
+      ),
+    );
+  }
+
+  Widget _buildDefaultImage() {
+    return Container(
+      width: 56,
+      height: 56,
+      color: Colors.grey[800],
+      child: const Icon(Icons.music_note, color: Color(0xFF1DB954)),
+    );
+  }
+
+  Widget _buildLoadingImage() {
+    return Container(
+      width: 56,
+      height: 56,
+      color: Colors.grey[800],
+      child: const Center(
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF1DB954)),
+          ),
+        ),
+      ),
     );
   }
 }
