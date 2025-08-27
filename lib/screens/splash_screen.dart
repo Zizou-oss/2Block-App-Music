@@ -2,7 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:animated_splash_screen/animated_splash_screen.dart';
-import 'home_screen.dart'; // Assure-toi d'importer ton HomeScreen correctement
+import 'masterclass_home_screen.dart'; // Import du nouveau homescreen masterclass
 
 class SplashScreen extends StatelessWidget {
   const SplashScreen({super.key});
@@ -14,7 +14,7 @@ class SplashScreen extends StatelessWidget {
           'assets/images/logo.png'), // Le logo que tu as ajouté dans les assets
       splashIconSize: 400, // La taille de l'icône/logo
       nextScreen:
-          const HomeScreen(), // L'écran qui sera affiché après l'animation (ici, ton HomeScreen)
+          const MasterclassHomeScreen(), // Le nouveau homescreen avec toutes les fonctionnalités masterclass
       splashTransition: SplashTransition
           .scaleTransition, // Type de transition (ici un effet de mise à l'échelle)
       backgroundColor:

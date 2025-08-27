@@ -59,38 +59,68 @@ class GithubService {
     return [
       Track(
         title: 'Vie d\'avant',
+        artist: '2Block',
+        album: 'Collection 2Block',
         url: 'https://raw.githubusercontent.com/Zizou-oss/my-audio-files/main/2Block-Vie-d\'enfance.m4a',
         imageUrl: 'assets/images/song1.jpg',
+        duration: const Duration(minutes: 3, seconds: 45),
+        genre: 'Rap Français',
+        year: 2023,
         localPath: '',
       ),
       Track(
         title: 'Compliqué',
+        artist: '2Block',
+        album: 'Collection 2Block',
         url: 'https://raw.githubusercontent.com/Zizou-oss/my-audio-files/main/2Block-Compliqu%C3%A9.m4a',
         imageUrl: 'assets/images/song1.jpg',
+        duration: const Duration(minutes: 4, seconds: 12),
+        genre: 'Rap Français',
+        year: 2023,
         localPath: '',
       ),
       Track(
         title: 'Mélodie',
+        artist: '2Block',
+        album: 'Collection 2Block',
         url: 'https://raw.githubusercontent.com/Zizou-oss/my-audio-files/main/2Block-Melodie.m4a',
         imageUrl: 'assets/images/song1.jpg',
+        duration: const Duration(minutes: 3, seconds: 28),
+        genre: 'Rap Français',
+        year: 2023,
         localPath: '',
       ),
       Track(
         title: 'Africain',
+        artist: '2Block',
+        album: 'Collection 2Block',
         url: 'https://raw.githubusercontent.com/Zizou-oss/my-audio-files/main/2Block-Africain.m4a',
         imageUrl: 'assets/images/song1.jpg',
+        duration: const Duration(minutes: 3, seconds: 52),
+        genre: 'Afrobeat',
+        year: 2023,
         localPath: '',
       ),
       Track(
         title: '2025',
+        artist: 'Loudab',
+        album: 'Freestyle Collection',
         url: 'https://raw.githubusercontent.com/Zizou-oss/my-audio-files/main/Loudab%20-%20two%20tousand%20and%20twenty%20five%20%20freestyle%20(2025)%202025-04-08%2021_09.m4a',
         imageUrl: 'assets/images/song1.jpg',
+        duration: const Duration(minutes: 2, seconds: 57),
+        genre: 'Freestyle',
+        year: 2025,
         localPath: '',
       ),
       Track(
         title: 'Cash à la maison',
+        artist: '2Block',
+        album: 'Collection 2Block',
         url: 'https://raw.githubusercontent.com/Zizou-oss/my-audio-files/main/2Block-C.A.L.M.m4a',
         imageUrl: 'assets/images/song1.jpg',
+        duration: const Duration(minutes: 4, seconds: 35),
+        genre: 'Rap Français',
+        year: 2023,
         localPath: '',
       ),
     ];
@@ -114,8 +144,12 @@ class GithubService {
   static List<Track> searchTracks(String query) {
     if (_cachedTracks == null || query.isEmpty) return [];
     
+    final lowerQuery = query.toLowerCase();
     return _cachedTracks!.where((track) =>
-      track.title.toLowerCase().contains(query.toLowerCase())
+      track.title.toLowerCase().contains(lowerQuery) ||
+      track.artist.toLowerCase().contains(lowerQuery) ||
+      track.album.toLowerCase().contains(lowerQuery) ||
+      (track.genre?.toLowerCase().contains(lowerQuery) ?? false)
     ).toList();
   }
   
