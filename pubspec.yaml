@@ -1,0 +1,49 @@
+name: mon_app
+description: Application mobile pour écouter et télécharger mes sons.
+publish_to: 'none' # Ce projet n'est pas publié sur pub.dev
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.2.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Pour lire l'audio en streaming
+  just_audio: ^0.9.36
+
+  # Pour télécharger les fichiers
+  dio: ^5.4.2+1
+
+  # Pour trouver le dossier local de l'app
+  path_provider: ^2.1.2
+
+  # Pour les icônes Material
+  just_audio_background: ^0.0.1-beta.11
+  audio_service: ^0.18.12
+  provider: ^6.1.1
+  flutter_svg: ^2.0.9
+  cupertino_icons: ^1.0.8
+  animated_splash_screen: ^1.3.0 
+  flutter_native_splash: ^2.4.6  # Assure-toi que cette ligne est unique
+  http: ^1.3.0
+  shared_preferences: ^2.0.17
+  audioplayers: ^6.4.0
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/ # Dossier contenant les images
+
+flutter_native_splash:
+  image: assets/images/logo.png  # Ton logo
+  color: "#000000"  # Couleur d'arrière-plan
+  android: true  # Splash pour Android
+  ios: true  # Splash pour iOS
